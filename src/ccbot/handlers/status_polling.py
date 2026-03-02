@@ -291,12 +291,16 @@ def _clear_autoclose_if_active(user_id: int, thread_id: int) -> None:
     _autoclose_timers.pop((user_id, thread_id), None)
 
 
-async def _check_unbound_window_ttl() -> None:
+async def _check_unbound_window_ttl(live_windows: list | None = None) -> None:
     """Kill unbound tmux windows whose TTL has expired.
 
     Unbound windows are live tmux windows not bound to any topic. They appear
     when a topic is closed (window kept alive for rebinding). After
     autoclose_done_minutes they are auto-killed.
+
+    Args:
+        live_windows: Pre-fetched tmux windows (avoids duplicate subprocess call).
+            Falls back to fetching if None.
     """
     timeout = config.autoclose_done_minutes * 60
     if timeout <= 0:
@@ -307,8 +311,9 @@ async def _check_unbound_window_ttl() -> None:
     for _, _, wid in session_manager.iter_thread_bindings():
         bound_ids.add(wid)
 
-    # Get all live tmux windows
-    live_windows = await tmux_manager.list_windows()
+    # Get all live tmux windows (use pre-fetched if available)
+    if live_windows is None:
+        live_windows = await tmux_manager.list_windows()
     live_ids = {w.window_id for w in live_windows}
 
     # Remove timers for windows that got rebound or no longer exist
@@ -777,6 +782,18 @@ def _record_probe_failure(window_id: str) -> int:
     return count
 
 
+async def _prune_stale_state(live_windows: list) -> None:
+    """Sync display names and prune orphaned state entries.
+
+    Called every TOPIC_CHECK_INTERVAL from the poll loop with pre-fetched
+    live tmux windows to avoid duplicate subprocess calls.
+    """
+    live_ids = {w.window_id for w in live_windows}
+    live_pairs = [(w.window_id, w.window_name) for w in live_windows]
+    session_manager.sync_display_names(live_pairs)
+    session_manager.prune_stale_state(live_ids)
+
+
 async def _probe_topic_existence(bot: Bot) -> None:
     """Probe all bound topics via Telegram API; detect deleted topics."""
     for user_id, thread_id, wid in list(session_manager.iter_thread_bindings()):
@@ -823,10 +840,13 @@ async def status_poll_loop(bot: Bot) -> None:
     _error_streak = 0
     while True:
         try:
-            # Periodic topic existence probe
+            # Periodic topic existence probe + stale state cleanup
             now = time.monotonic()
+            live_windows = None
             if now - last_topic_check >= TOPIC_CHECK_INTERVAL:
                 last_topic_check = now
+                live_windows = await tmux_manager.list_windows()
+                await _prune_stale_state(live_windows)
                 await _probe_topic_existence(bot)
 
             for user_id, thread_id, wid in list(session_manager.iter_thread_bindings()):
@@ -868,7 +888,7 @@ async def status_poll_loop(bot: Bot) -> None:
             # Check timers at end of each poll cycle
             await _check_autoclose_timers(bot)
             await _check_idle_clear_timers(bot)
-            await _check_unbound_window_ttl()
+            await _check_unbound_window_ttl(live_windows)
 
         except _LoopError:
             logger.exception("Status poll loop error")

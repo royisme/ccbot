@@ -301,6 +301,13 @@ class SessionManager:
         live_ids = {w.window_id for w in live}
         self.prune_session_map(live_ids)
 
+        # Sync display names from live tmux windows (detect external renames)
+        live_pairs = [(w.window_id, w.window_name) for w in live]
+        self.sync_display_names(live_pairs)
+
+        # Prune orphaned display names and group_chat_ids
+        self.prune_stale_state(live_ids)
+
     # --- Display name management ---
 
     def get_display_name(self, window_id: str) -> str:
@@ -316,6 +323,27 @@ class SessionManager:
             if ws:
                 ws.window_name = window_name
             self._save_state()
+
+    def sync_display_names(self, live_windows: list[tuple[str, str]]) -> bool:
+        """Sync display names from live tmux windows. Returns True if changed.
+
+        Saves state internally when changes are detected.
+        """
+        changed = False
+        for window_id, window_name in live_windows:
+            old = self.window_display_names.get(window_id)
+            if old and old != window_name:
+                self.window_display_names[window_id] = window_name
+                ws = self.window_states.get(window_id)
+                if ws:
+                    ws.window_name = window_name
+                changed = True
+                logger.info(
+                    "Synced display name: %s %s → %s", window_id, old, window_name
+                )
+        if changed:
+            self._save_state()
+        return changed
 
     async def wait_for_session_map_entry(
         self, window_id: str, timeout: float = 5.0, interval: float = 0.5
@@ -353,6 +381,49 @@ class SessionManager:
             "Timed out waiting for session_map entry: window_id=%s", window_id
         )
         return False
+
+    def prune_stale_state(self, live_window_ids: set[str]) -> bool:
+        """Remove orphaned entries from window_display_names and group_chat_ids.
+
+        Returns True if any changes were made.
+        """
+        # Collect window_ids that are "in use" (bound or have window_states)
+        in_use = set(self.window_states.keys())
+        for bindings in self.thread_bindings.values():
+            in_use.update(bindings.values())
+
+        # Prune window_display_names for dead windows not in use and not live
+        stale_display = [
+            wid
+            for wid in self.window_display_names
+            if wid not in live_window_ids and wid not in in_use
+        ]
+
+        # Collect all bound thread keys "user_id:thread_id"
+        bound_keys: set[str] = set()
+        for user_id, bindings in self.thread_bindings.items():
+            for thread_id in bindings:
+                bound_keys.add(f"{user_id}:{thread_id}")
+
+        # Prune group_chat_ids for unbound threads
+        stale_chat = [k for k in self.group_chat_ids if k not in bound_keys]
+
+        if not stale_display and not stale_chat:
+            return False
+
+        for wid in stale_display:
+            logger.info(
+                "Pruning stale display name: %s (%s)",
+                wid,
+                self.window_display_names[wid],
+            )
+            del self.window_display_names[wid]
+        for key in stale_chat:
+            logger.info("Pruning stale group_chat_id: %s", key)
+            del self.group_chat_ids[key]
+
+        self._save_state()
+        return True
 
     def prune_session_map(self, live_window_ids: set[str]) -> None:
         """Remove session_map.json entries for windows that no longer exist.
@@ -800,13 +871,27 @@ class SessionManager:
         self._window_to_thread.pop((user_id, window_id), None)
         if not bindings:
             del self.thread_bindings[user_id]
-        self._save_state()
         logger.info(
             "Unbound thread %d (was %s) for user %d",
             thread_id,
             window_id,
             user_id,
         )
+
+        # Clean up group_chat_id for the unbound thread
+        chat_key = f"{user_id}:{thread_id}"
+        self.group_chat_ids.pop(chat_key, None)
+
+        # Remove display name if no other thread still references this window
+        still_bound = any(
+            wid == window_id
+            for user_bindings in self.thread_bindings.values()
+            for wid in user_bindings.values()
+        )
+        if not still_bound and window_id not in self.window_states:
+            self.window_display_names.pop(window_id, None)
+
+        self._save_state()
         return window_id
 
     def get_window_for_thread(self, user_id: int, thread_id: int) -> str | None:

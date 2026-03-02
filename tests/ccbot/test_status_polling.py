@@ -23,6 +23,7 @@ from ccbot.handlers.status_polling import (
     _MAX_PROBE_FAILURES,
     _probe_failures,
     _probe_topic_existence,
+    _prune_stale_state,
     _start_autoclose_timer,
     _start_idle_clear_timer,
     _startup_times,
@@ -729,7 +730,6 @@ class TestProbeFailures:
         bot.unpin_all_forum_topic_messages.assert_not_called()
 
     async def test_probe_success_resets_counter(self) -> None:
-
         _probe_failures["@5"] = 2
         bot = AsyncMock()
         with patch("ccbot.handlers.status_polling.session_manager") as mock_sm:
@@ -803,3 +803,24 @@ class TestProbeFailures:
         mock_cleanup.assert_called_once_with(1, 42, bot, window_id="@5")
         mock_sm.unbind_thread.assert_called_once_with(1, 42)
         assert "@5" not in _probe_failures
+
+
+class TestPruneStaleStatePolling:
+    async def test_calls_sync_and_prune(self) -> None:
+        mock_win = MagicMock()
+        mock_win.window_id = "@1"
+        mock_win.window_name = "proj"
+        with patch("ccbot.handlers.status_polling.session_manager") as mock_sm:
+            mock_sm.sync_display_names.return_value = False
+            mock_sm.prune_stale_state.return_value = False
+            await _prune_stale_state([mock_win])
+        mock_sm.sync_display_names.assert_called_once_with([("@1", "proj")])
+        mock_sm.prune_stale_state.assert_called_once_with({"@1"})
+
+    async def test_empty_window_list(self) -> None:
+        with patch("ccbot.handlers.status_polling.session_manager") as mock_sm:
+            mock_sm.sync_display_names.return_value = False
+            mock_sm.prune_stale_state.return_value = False
+            await _prune_stale_state([])
+        mock_sm.sync_display_names.assert_called_once_with([])
+        mock_sm.prune_stale_state.assert_called_once_with(set())

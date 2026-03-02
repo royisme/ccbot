@@ -490,3 +490,116 @@ class TestSetWindowProvider:
         mgr.set_window_provider("@5", "gemini")
         assert "@5" in mgr.window_states
         assert mgr.window_states["@5"].provider_name == "gemini"
+
+
+class TestSyncDisplayNames:
+    def test_updates_drifted_name(self, mgr: SessionManager) -> None:
+        mgr.window_display_names["@1"] = "old-name"
+        changed = mgr.sync_display_names([("@1", "new-name")])
+        assert changed is True
+        assert mgr.get_display_name("@1") == "new-name"
+
+    def test_updates_window_state_too(self, mgr: SessionManager) -> None:
+        mgr.window_display_names["@1"] = "old-name"
+        mgr.window_states["@1"] = WindowState(window_name="old-name")
+        mgr.sync_display_names([("@1", "new-name")])
+        assert mgr.window_states["@1"].window_name == "new-name"
+
+    def test_noop_when_names_match(self, mgr: SessionManager) -> None:
+        mgr.window_display_names["@1"] = "same"
+        changed = mgr.sync_display_names([("@1", "same")])
+        assert changed is False
+
+    def test_skips_unknown_windows(self, mgr: SessionManager) -> None:
+        changed = mgr.sync_display_names([("@99", "new-proj")])
+        assert changed is False
+        assert "@99" not in mgr.window_display_names
+
+    def test_multiple_windows(self, mgr: SessionManager) -> None:
+        mgr.window_display_names["@1"] = "a"
+        mgr.window_display_names["@2"] = "b"
+        changed = mgr.sync_display_names([("@1", "a-renamed"), ("@2", "b")])
+        assert changed is True
+        assert mgr.get_display_name("@1") == "a-renamed"
+        assert mgr.get_display_name("@2") == "b"
+
+
+class TestPruneStaleState:
+    def test_removes_orphaned_display_names(self, mgr: SessionManager) -> None:
+        mgr.window_display_names["@1"] = "alive"
+        mgr.window_display_names["@2"] = "dead"
+        changed = mgr.prune_stale_state(live_window_ids={"@1"})
+        assert changed is True
+        assert "@1" in mgr.window_display_names
+        assert "@2" not in mgr.window_display_names
+
+    def test_keeps_display_name_if_bound(self, mgr: SessionManager) -> None:
+        mgr.bind_thread(100, 1, "@2", window_name="bound-proj")
+        changed = mgr.prune_stale_state(live_window_ids=set())
+        assert changed is False
+        assert "@2" in mgr.window_display_names
+
+    def test_keeps_display_name_if_has_window_state(self, mgr: SessionManager) -> None:
+        mgr.window_display_names["@3"] = "with-state"
+        mgr.window_states["@3"] = WindowState(session_id="sid")
+        changed = mgr.prune_stale_state(live_window_ids=set())
+        assert changed is False
+        assert "@3" in mgr.window_display_names
+
+    def test_removes_orphaned_group_chat_ids(self, mgr: SessionManager) -> None:
+        mgr.set_group_chat_id(100, 1, -999)
+        mgr.set_group_chat_id(100, 2, -888)
+        mgr.bind_thread(100, 1, "@1")
+        changed = mgr.prune_stale_state(live_window_ids={"@1"})
+        assert changed is True
+        assert "100:1" in mgr.group_chat_ids
+        assert "100:2" not in mgr.group_chat_ids
+
+    def test_noop_when_nothing_stale(self, mgr: SessionManager) -> None:
+        mgr.bind_thread(100, 1, "@1", window_name="proj")
+        mgr.set_group_chat_id(100, 1, -999)
+        changed = mgr.prune_stale_state(live_window_ids={"@1"})
+        assert changed is False
+
+    def test_prunes_both_display_and_chat(self, mgr: SessionManager) -> None:
+        mgr.window_display_names["@dead"] = "gone"
+        mgr.group_chat_ids["200:99"] = -777
+        changed = mgr.prune_stale_state(live_window_ids=set())
+        assert changed is True
+        assert "@dead" not in mgr.window_display_names
+        assert "200:99" not in mgr.group_chat_ids
+
+
+class TestUnbindThreadCleanup:
+    def test_cleans_up_group_chat_id(self, mgr: SessionManager) -> None:
+        mgr.bind_thread(100, 1, "@1")
+        mgr.set_group_chat_id(100, 1, -999)
+        mgr.unbind_thread(100, 1)
+        assert "100:1" not in mgr.group_chat_ids
+
+    def test_removes_display_name_when_no_refs(self, mgr: SessionManager) -> None:
+        mgr.bind_thread(100, 1, "@1", window_name="proj")
+        assert "@1" in mgr.window_display_names
+        mgr.unbind_thread(100, 1)
+        assert "@1" not in mgr.window_display_names
+
+    def test_keeps_display_name_when_other_thread_bound(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.bind_thread(100, 1, "@1", window_name="proj")
+        mgr.bind_thread(200, 2, "@1")
+        mgr.unbind_thread(100, 1)
+        assert "@1" in mgr.window_display_names
+
+    def test_keeps_display_name_when_window_state_exists(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.bind_thread(100, 1, "@1", window_name="proj")
+        mgr.window_states["@1"] = WindowState(session_id="sid")
+        mgr.unbind_thread(100, 1)
+        assert "@1" in mgr.window_display_names
+
+    def test_group_chat_id_absent_is_safe(self, mgr: SessionManager) -> None:
+        mgr.bind_thread(100, 1, "@1")
+        result = mgr.unbind_thread(100, 1)
+        assert result == "@1"
