@@ -56,7 +56,10 @@ from .providers import (
     registry,
 )
 from .config import config
-from .codex_status import build_codex_status_snapshot
+from .codex_status import (
+    build_codex_status_snapshot,
+    has_codex_assistant_output_since,
+)
 from .handlers.callback_data import (
     CB_DIR_CANCEL,
     CB_DIR_CONFIRM,
@@ -155,6 +158,7 @@ _ERROR_KEYWORDS_RE = re.compile(
 
 # Max label length for /recall command buttons (wider than status bar buttons)
 _RECALL_LABEL_MAX = 40
+_CODEX_STATUS_FALLBACK_DELAY_SECONDS = 1.2
 
 # Session monitor instance
 session_monitor: SessionMonitor | None = None
@@ -343,6 +347,7 @@ async def forward_command_handler(
         "Forwarding command %s to window %s (user=%d)", cc_slash, display, user.id
     )
     await update.message.chat.send_action(ChatAction.TYPING)
+    status_probe_offset = _codex_status_probe_offset(window_id, cc_slash)
     success, message = await session_manager.send_to_window(window_id, cc_slash)
     if success:
         if thread_id is not None:
@@ -351,7 +356,11 @@ async def forward_command_handler(
             record_command(user.id, thread_id, cc_slash)
         await safe_reply(update.message, f"\u26a1 [{display}] Sent: {cc_slash}")
         await _maybe_send_codex_status_snapshot(
-            update.message, window_id, display, cc_slash
+            update.message,
+            window_id,
+            display,
+            cc_slash,
+            since_offset=status_probe_offset,
         )
         # If /clear command was sent, clear the session association
         # so we can detect the new session after first message
@@ -376,11 +385,33 @@ async def forward_command_handler(
         await safe_reply(update.message, f"\u274c {message}")
 
 
+def _codex_status_probe_offset(window_id: str, cc_slash: str) -> int | None:
+    """Return transcript file offset before sending codex /status(/stats)."""
+    command = cc_slash.split(None, 1)[0].lower()
+    if command not in ("/status", "/stats"):
+        return None
+
+    provider = get_provider_for_window(window_id)
+    if provider.capabilities.name != "codex":
+        return None
+
+    transcript_path = session_manager.get_window_state(window_id).transcript_path
+    if not transcript_path:
+        return None
+
+    try:
+        return Path(transcript_path).stat().st_size
+    except OSError:
+        return None
+
+
 async def _maybe_send_codex_status_snapshot(
     message: Message,
     window_id: str,
     display: str,
     cc_slash: str,
+    *,
+    since_offset: int | None = None,
 ) -> None:
     """Send transcript-based Codex status fallback for /status and /stats."""
     command = cc_slash.split(None, 1)[0].lower()
@@ -400,7 +431,18 @@ async def _maybe_send_codex_status_snapshot(
         )
         return
 
-    snapshot = build_codex_status_snapshot(
+    if since_offset is not None:
+        await asyncio.sleep(_CODEX_STATUS_FALLBACK_DELAY_SECONDS)
+        has_native_output = await asyncio.to_thread(
+            has_codex_assistant_output_since,
+            transcript_path,
+            since_offset,
+        )
+        if has_native_output:
+            return
+
+    snapshot = await asyncio.to_thread(
+        build_codex_status_snapshot,
         transcript_path,
         display_name=display,
         session_id=state.session_id,

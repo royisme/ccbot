@@ -268,3 +268,26 @@ class TestForwardCommandResolution:
         self.mock_sm.send_to_window.assert_called_once_with("@1", "/status")
         mock_snapshot.assert_not_called()
         assert update.message.reply_text.call_count == 1
+
+    async def test_codex_status_skips_fallback_when_native_reply_exists(self) -> None:
+        self.mock_sm.get_window_state.return_value = SimpleNamespace(
+            transcript_path="/tmp/codex.jsonl",
+            session_id="sess-1",
+            cwd="/work/repo",
+        )
+        codex_provider = SimpleNamespace(capabilities=SimpleNamespace(name="codex"))
+
+        with (
+            patch("ccbot.bot.get_cc_name", return_value="/status"),
+            patch("ccbot.bot.get_provider_for_window", return_value=codex_provider),
+            patch("ccbot.bot._codex_status_probe_offset", return_value=0),
+            patch("ccbot.bot.has_codex_assistant_output_since", return_value=True),
+            patch("ccbot.bot.build_codex_status_snapshot") as mock_snapshot,
+            patch("ccbot.bot.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            update = _make_update(text="/status")
+            await forward_command_handler(update, _make_context())
+
+        self.mock_sm.send_to_window.assert_called_once_with("@1", "/status")
+        mock_snapshot.assert_not_called()
+        assert update.message.reply_text.call_count == 1

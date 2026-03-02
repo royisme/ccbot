@@ -2,7 +2,10 @@
 
 import json
 
-from ccbot.codex_status import build_codex_status_snapshot
+from ccbot.codex_status import (
+    build_codex_status_snapshot,
+    has_codex_assistant_output_since,
+)
 
 
 def _write_jsonl(path, entries) -> None:
@@ -99,3 +102,51 @@ def test_build_codex_status_snapshot_without_token_count(tmp_path) -> None:
 
     assert result is not None
     assert "token stats: unavailable" in result
+
+
+def test_has_codex_assistant_output_since_detects_response(tmp_path) -> None:
+    transcript = tmp_path / "codex.jsonl"
+    _write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-03-02T17:00:00.000Z",
+                "type": "input_item",
+                "payload": {"role": "user", "content": "/status"},
+            },
+            {
+                "timestamp": "2026-03-02T17:00:01.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "status text"}],
+                },
+            },
+        ],
+    )
+
+    assert has_codex_assistant_output_since(str(transcript), 0) is True
+
+
+def test_has_codex_assistant_output_since_handles_midline_offset(tmp_path) -> None:
+    transcript = tmp_path / "codex.jsonl"
+    _write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-03-02T17:00:00.000Z",
+                "type": "event_msg",
+                "payload": {"type": "token_count", "info": {"total_token_usage": {}}},
+            },
+            {
+                "timestamp": "2026-03-02T17:00:02.000Z",
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "ready"},
+            },
+        ],
+    )
+
+    first_line = transcript.read_text(encoding="utf-8").splitlines()[0]
+    mid_offset = len(first_line) // 2
+    assert has_codex_assistant_output_since(str(transcript), mid_offset) is True

@@ -8,6 +8,7 @@ messages; this snapshot provides a reliable fallback.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -50,7 +51,7 @@ def _display_cwd(cwd: str) -> str:
 
 
 def _parse_json_object(raw_line: str) -> dict[str, Any] | None:
-    """Parse a JSON object line, returning None for blank/invalid/non-dict."""
+    """Parse one JSON object line."""
     line = raw_line.strip()
     if not line:
         return None
@@ -61,50 +62,64 @@ def _parse_json_object(raw_line: str) -> dict[str, Any] | None:
     return entry if isinstance(entry, dict) else None
 
 
-def _read_json_entries(path: Path) -> list[dict[str, Any]] | None:
-    """Read valid JSON object entries from transcript."""
-    entries: list[dict[str, Any]] = []
-    try:
-        with path.open(encoding="utf-8") as handle:
-            for raw_line in handle:
-                parsed = _parse_json_object(raw_line)
-                if parsed is not None:
-                    entries.append(parsed)
-    except OSError:
-        return None
-    return entries
-
-
-def _read_snapshot_fields(
+def _iter_json_entries(
     path: Path,
-) -> tuple[int, str, dict[str, Any], dict[str, Any]] | None:
-    """Read transcript fields needed for status formatting."""
-    entries = _read_json_entries(path)
-    if entries is None:
-        return None
-    if not entries:
-        return None
+    *,
+    start_offset: int = 0,
+) -> Iterator[dict[str, Any]]:
+    """Yield parsed JSON object entries from transcript."""
+    with path.open(encoding="utf-8") as handle:
+        if start_offset > 0:
+            handle.seek(start_offset)
+        for raw_line in handle:
+            parsed = _parse_json_object(raw_line)
+            if parsed is not None:
+                yield parsed
 
-    entry_count = len(entries)
-    last_timestamp = ""
-    session_meta: dict[str, Any] = {}
-    last_token_info: dict[str, Any] = {}
 
-    for entry in entries:
-        timestamp = entry.get("timestamp")
-        if isinstance(timestamp, str) and timestamp:
-            last_timestamp = timestamp
+def _entry_has_assistant_output(entry: dict[str, Any]) -> bool:
+    """True when entry contains assistant-visible output."""
+    entry_type = entry.get("type")
+    payload = _as_dict(entry.get("payload"))
 
-        payload = _as_dict(entry.get("payload"))
-        entry_type = entry.get("type")
-        if entry_type == "session_meta" and payload:
-            session_meta = payload
+    if entry_type == "event_msg" and payload.get("type") == "agent_message":
+        message = payload.get("message")
+        return isinstance(message, str) and bool(message.strip())
+
+    if entry_type != "response_item":
+        return False
+    if payload.get("type") != "message" or payload.get("role") != "assistant":
+        return False
+
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return False
+    for block in content:
+        if not isinstance(block, dict):
             continue
-        if entry_type == "event_msg" and payload.get("type") == "token_count":
-            info = _as_dict(payload.get("info"))
-            if info:
-                last_token_info = info
-    return entry_count, last_timestamp, session_meta, last_token_info
+        if block.get("type") != "output_text":
+            continue
+        text = block.get("text")
+        if isinstance(text, str) and text.strip():
+            return True
+    return False
+
+
+def has_codex_assistant_output_since(
+    transcript_path: str,
+    offset: int,
+) -> bool:
+    """Check whether transcript contains assistant output after offset."""
+    path = Path(transcript_path)
+    if not path.exists():
+        return False
+    try:
+        for entry in _iter_json_entries(path, start_offset=offset):
+            if _entry_has_assistant_output(entry):
+                return True
+    except OSError:
+        return False
+    return False
 
 
 def _format_token_lines(last_token_info: dict[str, Any]) -> list[str]:
@@ -164,10 +179,32 @@ def build_codex_status_snapshot(
     if not path.exists():
         return None
 
-    snapshot = _read_snapshot_fields(path)
-    if snapshot is None:
+    entry_count = 0
+    last_timestamp = ""
+    session_meta: dict[str, Any] = {}
+    last_token_info: dict[str, Any] = {}
+
+    try:
+        for entry in _iter_json_entries(path):
+            entry_count += 1
+            timestamp = entry.get("timestamp")
+            if isinstance(timestamp, str) and timestamp:
+                last_timestamp = timestamp
+
+            payload = _as_dict(entry.get("payload"))
+            entry_type = entry.get("type")
+            if entry_type == "session_meta" and payload:
+                session_meta = payload
+                continue
+            if entry_type == "event_msg" and payload.get("type") == "token_count":
+                info = _as_dict(payload.get("info"))
+                if info:
+                    last_token_info = info
+    except OSError:
         return None
-    entry_count, last_timestamp, session_meta, last_token_info = snapshot
+
+    if entry_count == 0:
+        return None
 
     resolved_session = (
         session_id
