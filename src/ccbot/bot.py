@@ -120,6 +120,7 @@ from .handlers.screenshot_callbacks import handle_screenshot_callback
 from .handlers.window_callbacks import handle_window_callback
 from .handlers.directory_browser import clear_browse_state
 from .handlers.cleanup import clear_topic_state
+from .handlers.topic_emoji import strip_emoji_prefix, update_stored_topic_name
 from .handlers.history import send_history
 from .handlers.sessions_dashboard import (
     handle_sessions_kill,
@@ -520,6 +521,60 @@ async def topic_closed_handler(
     else:
         logger.debug(
             "Topic closed: no binding (user=%d, thread=%d)", user.id, thread_id
+        )
+
+
+async def topic_edited_handler(
+    update: Update, _context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle topic rename — sync new name to tmux window and emoji cache.
+
+    Ignores icon-only edits (name is None) and emoji-only changes from the bot
+    itself (clean name unchanged after stripping prefixes).
+    """
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id):
+        return
+    if not update.message or not update.message.forum_topic_edited:
+        return
+
+    new_name = update.message.forum_topic_edited.name
+    if not new_name:
+        return
+
+    thread_id = _get_thread_id(update)
+    if thread_id is None:
+        return
+
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:
+        return
+
+    window_id = session_manager.get_window_for_chat_thread(chat_id, thread_id)
+    if not window_id:
+        logger.debug("Topic edited: no binding (thread=%d)", thread_id)
+        return
+
+    clean_name = strip_emoji_prefix(new_name)
+
+    # Loop guard: if clean name matches current display name, this was a
+    # bot-originated emoji/mode change — skip to prevent rename loops.
+    current_display = session_manager.get_display_name(window_id)
+    if current_display and strip_emoji_prefix(current_display) == clean_name:
+        logger.debug(
+            "Topic edited: name unchanged after strip, skipping (thread=%d)", thread_id
+        )
+        return
+
+    renamed = await tmux_manager.rename_window(window_id, clean_name)
+    if renamed:
+        session_manager.set_display_name(window_id, clean_name)
+        update_stored_topic_name(chat_id, thread_id, clean_name)
+        logger.info(
+            "Topic renamed: window %s → %r (thread=%d)",
+            window_id,
+            clean_name,
+            thread_id,
         )
 
 
@@ -1660,6 +1715,13 @@ def create_bot() -> Application:
         MessageHandler(
             filters.StatusUpdate.FORUM_TOPIC_CLOSED & _group_filter,
             topic_closed_handler,
+        )
+    )
+    # Topic renamed event — sync name to tmux window
+    application.add_handler(
+        MessageHandler(
+            filters.StatusUpdate.FORUM_TOPIC_EDITED & _group_filter,
+            topic_edited_handler,
         )
     )
     # Forward any other /command to the topic's provider CLI

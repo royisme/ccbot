@@ -42,8 +42,8 @@ _topic_states: dict[tuple[int, int], tuple[str, str]] = {}
 _pending_transitions: dict[tuple[int, int], tuple[str, float]] = {}
 
 # Topic display names: (chat_id, thread_id) -> clean name (without emoji prefix).
-# Set once on first emoji update; reused on subsequent updates to avoid overwriting
-# the topic name with the tmux window name (which may differ due to deduplication).
+# Updated when the incoming display name changes (write-through cache) so that
+# tmux window renames and Telegram topic renames propagate correctly.
 _topic_names: dict[tuple[int, int], str] = {}
 
 # Chats where editForumTopic is disabled due to permission errors
@@ -51,16 +51,22 @@ _disabled_chats: set[int] = set()
 
 
 def _resolve_topic_name(key: tuple[int, int], display_name: str) -> str:
-    """Return the clean topic name, storing it on first call per topic.
+    """Return the clean topic name, updating the cache when the name changes.
 
-    Uses the stored name on subsequent calls to avoid overwriting the Telegram
-    topic name with the tmux window name (which may differ due to deduplication).
+    On first call, strips emoji and stores the clean name. On subsequent calls,
+    if the incoming display_name (stripped) differs from the stored name,
+    overwrites the cache so tmux renames propagate to Telegram.
     """
-    if key in _topic_names:
-        return _topic_names[key]
     clean = strip_emoji_prefix(display_name)
-    _topic_names[key] = clean
-    return clean
+    cached = _topic_names.get(key)
+    if cached is None:
+        _topic_names[key] = clean
+        return clean
+    if cached != clean:
+        _topic_names[key] = clean
+        # Invalidate state so next update_topic_emoji re-applies emoji with new name
+        _topic_states.pop(key, None)
+    return _topic_names[key]
 
 
 def _resolve_approval_mode(chat_id: int, thread_id: int) -> str:
@@ -186,6 +192,16 @@ def strip_emoji_prefix(name: str) -> str:
     if name.startswith(yolo_prefix):
         return name[len(yolo_prefix) :]
     return name
+
+
+def update_stored_topic_name(chat_id: int, thread_id: int, new_clean_name: str) -> None:
+    """Overwrite the stored clean name for a topic.
+
+    Called from FORUM_TOPIC_EDITED handler. Does not invalidate _topic_states
+    since the Telegram topic already has the correct name — the next emoji
+    cycle will naturally use the updated base name.
+    """
+    _topic_names[(chat_id, thread_id)] = new_clean_name
 
 
 def clear_topic_emoji_state(chat_id: int, thread_id: int) -> None:

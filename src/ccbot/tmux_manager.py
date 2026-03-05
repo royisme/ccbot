@@ -443,6 +443,26 @@ class TmuxManager:
 
         return await asyncio.to_thread(_sync_kill)
 
+    async def rename_window(self, window_id: str, new_name: str) -> bool:
+        """Rename a tmux window by its ID. Returns True on success."""
+
+        def _sync_rename() -> bool:
+            session = self.get_session()
+            if not session:
+                return False
+            try:
+                window = session.windows.get(window_id=window_id, default=None)
+                if not window:
+                    return False
+                window.rename_window(new_name)
+                logger.info("Renamed window %s to %r", window_id, new_name)
+                return True
+            except _TmuxError:
+                logger.exception("Failed to rename window %s", window_id)
+                return False
+
+        return await asyncio.to_thread(_sync_rename)
+
     # ── Pane-level operations ──────────────────────────────────────────
 
     async def list_panes(self, window_id: str) -> list[PaneInfo]:

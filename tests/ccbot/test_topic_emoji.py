@@ -223,11 +223,23 @@ class TestTopicNamePreservation:
             name=f"{EMOJI_ACTIVE} myproject",
         )
 
-    async def test_reuses_stored_name_ignoring_new_display_name(self) -> None:
+    async def test_updates_stored_name_when_display_name_changes(self) -> None:
         bot = AsyncMock()
         await _debounced_update(bot, -100, 42, "active", "myproject")
         bot.edit_forum_topic.reset_mock()
-        await _debounced_update(bot, -100, 42, "idle", "myproject-2")
+        await _debounced_update(bot, -100, 42, "idle", "renamed")
+        bot.edit_forum_topic.assert_called_once_with(
+            chat_id=-100,
+            message_thread_id=42,
+            name=f"{EMOJI_IDLE} renamed",
+        )
+
+    async def test_emoji_prefix_does_not_trigger_name_change(self) -> None:
+        bot = AsyncMock()
+        await _debounced_update(bot, -100, 42, "active", "myproject")
+        bot.edit_forum_topic.reset_mock()
+        # Passing emoji-prefixed version should strip to same clean name
+        await _debounced_update(bot, -100, 42, "idle", f"{EMOJI_ACTIVE} myproject")
         bot.edit_forum_topic.assert_called_once_with(
             chat_id=-100,
             message_thread_id=42,
@@ -422,3 +434,18 @@ class TestStatusPollingIntegration:
             await update_status_message(bot, 1, "@0", thread_id=None)
 
             mock_emoji.assert_not_called()
+
+
+class TestUpdateStoredTopicName:
+    def test_overwrites_cached_name(self) -> None:
+        from ccbot.handlers.topic_emoji import _topic_names, update_stored_topic_name
+
+        _topic_names[(-100, 42)] = "old-name"
+        update_stored_topic_name(-100, 42, "new-name")
+        assert _topic_names[(-100, 42)] == "new-name"
+
+    def test_sets_name_when_not_cached(self) -> None:
+        from ccbot.handlers.topic_emoji import _topic_names, update_stored_topic_name
+
+        update_stored_topic_name(-100, 99, "fresh-name")
+        assert _topic_names[(-100, 99)] == "fresh-name"
