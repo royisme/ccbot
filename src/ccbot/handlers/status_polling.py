@@ -24,6 +24,8 @@ Key components:
   - Auto-close: closes topics stuck in done/dead state
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import structlog
@@ -36,6 +38,7 @@ from telegram import Bot
 
 if TYPE_CHECKING:
     from ..screen_buffer import ScreenBuffer
+    from ..tmux_manager import TmuxWindow
 from telegram.constants import ChatAction
 from telegram.error import BadRequest, TelegramError
 
@@ -651,13 +654,19 @@ async def update_status_message(
     user_id: int,
     window_id: str,
     thread_id: int | None = None,
+    *,
+    _window: TmuxWindow | None = None,
 ) -> None:
     """Poll terminal and enqueue status update for user's active window.
 
     Also detects permission prompt UIs (not triggered via JSONL) and enters
     interactive mode when found.
+
+    Args:
+        _window: Pre-fetched TmuxWindow (avoids duplicate list_windows call
+            when called from the poll loop).
     """
-    w = await tmux_manager.find_window_by_id(window_id)
+    w = _window or await tmux_manager.find_window_by_id(window_id)
     if not w:
         # Window gone, enqueue clear
         await enqueue_status_update(bot, user_id, window_id, None, thread_id=thread_id)
@@ -859,7 +868,11 @@ async def _probe_topic_existence(bot: Bot) -> None:
                     )
 
 
-async def _maybe_discover_transcript(window_id: str) -> None:
+async def _maybe_discover_transcript(
+    window_id: str,
+    *,
+    _window: TmuxWindow | None = None,
+) -> None:
     """Discover and register transcript for hookless providers (Codex, Gemini).
 
     Runs on each poll cycle for bound windows. For hookless providers, this
@@ -876,6 +889,10 @@ async def _maybe_discover_transcript(window_id: str) -> None:
 
     For externally-created windows, cwd may be empty (no hook to populate it).
     Falls back to the tmux window's pane_current_path.
+
+    Args:
+        _window: Pre-fetched TmuxWindow (avoids duplicate list_windows call
+            when called from the poll loop).
     """
     from ..providers import registry
 
@@ -883,7 +900,7 @@ async def _maybe_discover_transcript(window_id: str) -> None:
     if not state:
         return
 
-    w = await tmux_manager.find_window_by_id(window_id)
+    w = _window or await tmux_manager.find_window_by_id(window_id)
 
     # Re-detect provider from the current pane to recover from stale mappings.
     if w and w.pane_current_command:
@@ -975,13 +992,16 @@ async def status_poll_loop(bot: Bot) -> None:
     _error_streak = 0
     while True:
         try:
+            # Fetch all windows once per cycle — O(1) lookup replaces
+            # per-binding find_window_by_id calls (O(N×M) → O(N+M)).
+            all_windows = await tmux_manager.list_windows()
+            window_lookup: dict[str, TmuxWindow] = {w.window_id: w for w in all_windows}
+
             # Periodic topic existence probe + stale state cleanup
             now = time.monotonic()
-            live_windows = None
             if now - last_topic_check >= TOPIC_CHECK_INTERVAL:
                 last_topic_check = now
-                live_windows = await tmux_manager.list_windows()
-                await _prune_stale_state(live_windows)
+                await _prune_stale_state(all_windows)
                 await _probe_topic_existence(bot)
                 # Sweep stale log-throttle entries to prevent unbounded growth
                 log_throttle_sweep()
@@ -994,7 +1014,7 @@ async def status_poll_loop(bot: Bot) -> None:
                     if (user_id, thread_id, wid) in _dead_notified:
                         continue
 
-                    w = await tmux_manager.find_window_by_id(wid)
+                    w = window_lookup.get(wid)
                     if not w:
                         await _handle_dead_window_notification(
                             bot, user_id, thread_id, wid
@@ -1002,7 +1022,7 @@ async def status_poll_loop(bot: Bot) -> None:
                         continue
 
                     # Discover transcript for hookless providers (Codex, Gemini)
-                    await _maybe_discover_transcript(wid)
+                    await _maybe_discover_transcript(wid, _window=w)
 
                     queue = get_message_queue(user_id)
                     if queue and not queue.empty():
@@ -1012,6 +1032,7 @@ async def status_poll_loop(bot: Bot) -> None:
                         user_id,
                         wid,
                         thread_id=thread_id,
+                        _window=w,
                     )
                     # Scan non-active panes for interactive prompts (agent teams)
                     await _scan_window_panes(bot, user_id, wid, thread_id)
@@ -1027,7 +1048,7 @@ async def status_poll_loop(bot: Bot) -> None:
 
             # Check timers at end of each poll cycle
             await _check_autoclose_timers(bot)
-            await _check_unbound_window_ttl(live_windows)
+            await _check_unbound_window_ttl(all_windows)
 
         except _LoopError:
             logger.exception("Status poll loop error")
