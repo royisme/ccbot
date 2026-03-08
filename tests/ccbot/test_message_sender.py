@@ -108,6 +108,39 @@ class TestSendWithFallback:
         assert result is sent
         assert bot.send_message.call_count == 2
 
+    async def test_retry_after_then_permanent_fail_returns_none(self) -> None:
+        bot = AsyncMock()
+        bot.send_message.side_effect = [
+            RetryAfter(1),
+            TelegramError("permanent fail"),
+        ]
+        result = await _send_with_fallback(bot, 123, "hello")
+        assert result is None
+        assert bot.send_message.call_count == 2
+
+    async def test_plain_text_retry_after_then_success(self) -> None:
+        bot = AsyncMock()
+        sent = AsyncMock(spec=Message)
+        bot.send_message.side_effect = [
+            TelegramError("md fail"),
+            RetryAfter(1),
+            sent,
+        ]
+        result = await _send_with_fallback(bot, 123, "hello")
+        assert result is sent
+        assert bot.send_message.call_count == 3
+
+    async def test_plain_text_retry_after_then_permanent_fail(self) -> None:
+        bot = AsyncMock()
+        bot.send_message.side_effect = [
+            TelegramError("md fail"),
+            RetryAfter(1),
+            TelegramError("plain also dead"),
+        ]
+        result = await _send_with_fallback(bot, 123, "hello")
+        assert result is None
+        assert bot.send_message.call_count == 3
+
     async def test_fallback_strips_mdv2_escapes(self) -> None:
         bot = AsyncMock()
         sent = AsyncMock(spec=Message)

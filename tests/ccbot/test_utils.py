@@ -12,6 +12,7 @@ from ccbot.utils import (
     atomic_write_json,
     ccbot_dir,
     log_throttle_reset,
+    log_throttle_sweep,
     log_throttled,
     read_cwd_from_jsonl,
     read_session_metadata_from_jsonl,
@@ -296,3 +297,36 @@ class TestLogThrottled:
         assert "topic-probe:@1" not in _throttle_state
         assert "topic-probe:@2" not in _throttle_state
         assert "status-update:1:2" in _throttle_state
+
+
+class TestLogThrottleSweep:
+    @pytest.fixture(autouse=True)
+    def _clean_throttle_state(self):
+        _throttle_state.clear()
+        yield
+        _throttle_state.clear()
+
+    def test_removes_stale_entries(self):
+        _throttle_state["old"] = (100.0, "msg")
+        _throttle_state["fresh"] = (800.0, "msg")
+        removed = log_throttle_sweep(max_age=600.0, _clock=lambda: 800.0)
+        assert removed == 1
+        assert "old" not in _throttle_state
+        assert "fresh" in _throttle_state
+
+    def test_empty_state_returns_zero(self):
+        assert log_throttle_sweep() == 0
+
+    def test_all_fresh_removes_nothing(self):
+        _throttle_state["a"] = (100.0, "msg")
+        _throttle_state["b"] = (200.0, "msg")
+        removed = log_throttle_sweep(max_age=600.0, _clock=lambda: 300.0)
+        assert removed == 0
+        assert len(_throttle_state) == 2
+
+    def test_all_stale_clears_everything(self):
+        _throttle_state["a"] = (0.0, "msg")
+        _throttle_state["b"] = (1.0, "msg")
+        removed = log_throttle_sweep(max_age=10.0, _clock=lambda: 1000.0)
+        assert removed == 2
+        assert len(_throttle_state) == 0

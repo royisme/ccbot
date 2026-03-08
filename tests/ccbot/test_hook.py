@@ -540,6 +540,22 @@ class TestTabDelimitedParsing:
         assert entry["session_id"] == self._VALID_PAYLOAD["session_id"]
         assert entry["window_name"] == expected_window_name
 
+    def test_tmux_timeout_writes_no_session_map(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        monkeypatch.setenv("CCBOT_DIR", str(tmp_path))
+        monkeypatch.setenv("TMUX_PANE", "%0")
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(self._VALID_PAYLOAD)))
+
+        with patch(
+            "ccbot.hook.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="tmux", timeout=5),
+        ):
+            hook_main()
+
+        session_map_file = tmp_path / "session_map.json"
+        assert not session_map_file.exists()
+
 
 class TestHookStatus:
     def _all_events_settings(self) -> dict:
