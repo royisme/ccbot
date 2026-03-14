@@ -14,7 +14,6 @@ class TestOpenAICompatTranscriber:
     @patch("ccbot.whisper.openai_compat.openai.AsyncOpenAI")
     async def test_transcribe_success(self, mock_openai_class: MagicMock) -> None:
         """Test successful transcription returns the text."""
-        # Setup mock response
         mock_response = MagicMock()
         mock_response.text = "hello"
 
@@ -22,7 +21,6 @@ class TestOpenAICompatTranscriber:
         mock_client.audio.transcriptions.create = AsyncMock(return_value=mock_response)
         mock_openai_class.return_value = mock_client
 
-        # Create transcriber and transcribe
         transcriber = OpenAICompatTranscriber(
             api_key="test-key",
             model="whisper-1",
@@ -30,7 +28,36 @@ class TestOpenAICompatTranscriber:
         result = await transcriber.transcribe(b"fake audio data", "voice.ogg")
 
         assert result.text == "hello"
-        mock_client.audio.transcriptions.create.assert_called_once()
+        mock_client.audio.transcriptions.create.assert_called_once_with(
+            model="whisper-1",
+            file=("voice.ogg", b"fake audio data"),
+        )
+
+    @patch("ccbot.whisper.openai_compat.openai.AsyncOpenAI")
+    async def test_transcribe_passes_language_when_configured(
+        self, mock_openai_class: MagicMock
+    ) -> None:
+        """Test configured language is forwarded to the API call."""
+        mock_response = MagicMock()
+        mock_response.text = "你好"
+
+        mock_client = AsyncMock()
+        mock_client.audio.transcriptions.create = AsyncMock(return_value=mock_response)
+        mock_openai_class.return_value = mock_client
+
+        transcriber = OpenAICompatTranscriber(
+            api_key="test-key",
+            model="whisper-1",
+            language="zh",
+        )
+        result = await transcriber.transcribe(b"fake audio data", "voice.ogg")
+
+        assert result.text == "你好"
+        mock_client.audio.transcriptions.create.assert_called_once_with(
+            model="whisper-1",
+            file=("voice.ogg", b"fake audio data"),
+            language="zh",
+        )
 
     @patch("ccbot.whisper.openai_compat.openai.AsyncOpenAI")
     async def test_transcribe_empty_result(self, mock_openai_class: MagicMock) -> None:

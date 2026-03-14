@@ -59,16 +59,9 @@ async def _download_voice(message: Message, file_id: str) -> bytes | None:
 
 
 async def _transcribe_audio(
-    message: Message, audio_bytes: bytes
+    message: Message, transcriber, audio_bytes: bytes
 ) -> TranscriptionResult | None:
     """Transcribe audio bytes. Returns TranscriptionResult or None on error."""
-    transcriber = get_transcriber()
-    if transcriber is None:
-        await safe_reply(
-            message,
-            "⚠️ Voice transcription is not configured. Set CCBOT_WHISPER_PROVIDER to enable it.\n\nSupported providers: openai, groq",
-        )
-        return None
     try:
         return await transcriber.transcribe(audio_bytes, "voice.ogg")
     except (ValueError, RuntimeError) as e:
@@ -129,13 +122,25 @@ async def handle_voice_message(
         )
         return
 
+    transcriber = get_transcriber()
+    if transcriber is None:
+        await safe_reply(
+            message,
+            "⚠️ Voice transcription is not configured. Set CCBOT_WHISPER_PROVIDER to enable it.\n\nSupported providers: openai, groq",
+        )
+        return
+
     audio_bytes = await _download_voice(message, voice.file_id)
     if audio_bytes is None:
         return
 
-    await message.chat.send_action(ChatAction.TYPING)
+    await message.get_bot().send_chat_action(
+        chat_id=message.chat.id,
+        message_thread_id=message.message_thread_id,
+        action=ChatAction.TYPING,
+    )
 
-    result = await _transcribe_audio(message, audio_bytes)
+    result = await _transcribe_audio(message, transcriber, audio_bytes)
     if result is None:
         return
 
